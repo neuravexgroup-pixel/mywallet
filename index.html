@@ -16,6 +16,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
 <div id="app">
@@ -49,6 +50,7 @@
     <div class="pin-dots" id="pinDots"></div>
     <div class="lock-error" id="lockError"></div>
     <div class="keypad" id="keypad"></div>
+    <button class="btn-text" id="fingerprintBtn" style="color:white;opacity:0.9;margin-top:18px;text-decoration:none;font-weight:700;" hidden>👆 Use fingerprint instead</button>
   </div>
 
   <!-- ===== MAIN APP ===== -->
@@ -147,12 +149,27 @@
         <div class="settings-row" id="rowChangePin">
           <div class="sr-icon">🔒</div><div class="sr-label">Change PIN</div><div class="sr-chev">›</div>
         </div>
+        <div class="settings-row" id="rowFingerprint">
+          <div class="sr-icon">👆</div><div class="sr-label">Fingerprint unlock</div><div class="sr-val" id="fingerprintVal">Off</div><div class="sr-chev">›</div>
+        </div>
         <div class="settings-row" id="rowAutoLock">
           <div class="sr-icon">⏱️</div><div class="sr-label">Auto-lock</div><div class="sr-val" id="autoLockVal">Immediately</div><div class="sr-chev">›</div>
         </div>
       </div>
 
       <div class="settings-group">
+        <div class="settings-row" id="rowRecurring">
+          <div class="sr-icon">🔁</div><div class="sr-label">Recurring transactions</div><div class="sr-chev">›</div>
+        </div>
+        <div class="settings-row" id="rowLending">
+          <div class="sr-icon">🤝</div><div class="sr-label">Lending & debts</div><div class="sr-chev">›</div>
+        </div>
+      </div>
+
+      <div class="settings-group">
+        <div class="settings-row" id="rowGoogleDrive">
+          <div class="sr-icon">☁️</div><div class="sr-label">Google Drive backup</div><div class="sr-val" id="gdriveVal">Off</div><div class="sr-chev">›</div>
+        </div>
         <div class="settings-row" id="rowExport">
           <div class="sr-icon">⬇️</div><div class="sr-label">Export backup</div><div class="sr-chev">›</div>
         </div>

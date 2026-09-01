@@ -484,4 +484,15 @@ button, input, select { font-family: inherit; }
   font-size: 13px; font-weight: 600; z-index: 100; box-shadow: 0 8px 20px rgba(0,0,0,0.2);
 }
 
+.debt-row { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+.debt-row:last-child { border-bottom: none; }
+.debt-avatar { width: 36px; height: 36px; border-radius: 50%; background: var(--bg); color: var(--primary); display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 14px; flex-shrink: 0; }
+.debt-amt { font-weight: 800; font-size: 14px; }
+.debt-amt.owed_to_me { color: var(--success); }
+.debt-amt.i_owe { color: var(--danger); }
+.debt-tag { font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 999px; }
+.debt-tag.owed_to_me { background: var(--success-soft); color: var(--success); }
+.debt-tag.i_owe { background: var(--danger-soft); color: var(--danger); }
+.debt-row.settled { opacity: 0.5; }
+
 ::-webkit-scrollbar { display: none; }

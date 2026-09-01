@@ -38,6 +38,7 @@ function defaultState() {
     pinHash: null,
     pinSalt: null,
     autoLock: "immediate", // immediate | 1min | 5min
+    fingerprintCredId: null,
     wallets: [
       { id: uid(), name: "BK Bank", type: "bank", balance: 0 },
       { id: uid(), name: "MoMo", type: "momo", balance: 0 },
@@ -45,6 +46,8 @@ function defaultState() {
     ],
     transactions: [],
     goals: [],
+    recurringRules: [],
+    debts: [],
     categories: JSON.parse(JSON.stringify(DEFAULT_CATEGORIES))
   };
 }
@@ -54,7 +57,13 @@ let state = null;
 function loadState() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) : null;
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    // migrate older saves so new features don't crash on existing data
+    if (parsed.recurringRules === undefined) parsed.recurringRules = [];
+    if (parsed.debts === undefined) parsed.debts = [];
+    if (parsed.fingerprintCredId === undefined) parsed.fingerprintCredId = null;
+    return parsed;
   } catch (e) { return null; }
 }
 function saveState() {
@@ -97,6 +106,53 @@ function randomSalt() {
   return Array.from(arr).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 async function hashPin(pin, salt) { return sha256Hex(salt + ":" + pin); }
+
+/* ---------------- fingerprint (WebAuthn platform authenticator) ---------------- */
+function bufToBase64(buf) { return btoa(String.fromCharCode(...new Uint8Array(buf))); }
+function base64ToBuf(b64) { return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)).buffer; }
+
+async function platformAuthAvailable() {
+  if (!window.PublicKeyCredential || !navigator.credentials) return false;
+  try { return await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable(); }
+  catch (e) { return false; }
+}
+
+async function registerFingerprint() {
+  const challenge = crypto.getRandomValues(new Uint8Array(32));
+  const userId = crypto.getRandomValues(new Uint8Array(16));
+  try {
+    const cred = await navigator.credentials.create({
+      publicKey: {
+        challenge,
+        rp: { name: "MyWallet" },
+        user: { id: userId, name: state.profile.name || "user", displayName: state.profile.name || "MyWallet user" },
+        pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
+        authenticatorSelection: { authenticatorAttachment: "platform", userVerification: "required" },
+        timeout: 60000
+      }
+    });
+    if (!cred) return false;
+    state.fingerprintCredId = bufToBase64(cred.rawId);
+    saveState();
+    return true;
+  } catch (e) { return false; }
+}
+
+async function authenticateFingerprint() {
+  if (!state.fingerprintCredId) return false;
+  try {
+    const challenge = crypto.getRandomValues(new Uint8Array(32));
+    const assertion = await navigator.credentials.get({
+      publicKey: {
+        challenge,
+        allowCredentials: [{ id: base64ToBuf(state.fingerprintCredId), type: "public-key" }],
+        userVerification: "required",
+        timeout: 60000
+      }
+    });
+    return !!assertion;
+  } catch (e) { return false; }
+}
 
 /* ---------------- toast ---------------- */
 function toast(msg) {
@@ -178,7 +234,11 @@ function bindStaticEvents() {
   $("rowManageWallets").addEventListener("click", openManageWallets);
   $("rowManageCategories").addEventListener("click", openManageCategories);
   $("rowChangePin").addEventListener("click", openChangePin);
+  $("rowFingerprint").addEventListener("click", openFingerprintSettings);
   $("rowAutoLock").addEventListener("click", openAutoLockPicker);
+  $("rowRecurring").addEventListener("click", openRecurringList);
+  $("rowLending").addEventListener("click", openLendingList);
+  $("rowGoogleDrive").addEventListener("click", openGoogleDriveInfo);
   $("rowExport").addEventListener("click", exportBackup);
   $("rowImport").addEventListener("click", importBackup);
   $("rowLockNow").addEventListener("click", () => showLock(false));
@@ -241,6 +301,20 @@ function showLock(isSetupJustFinished) {
   renderPinDots();
   $("lockError").textContent = "";
   buildKeypad();
+
+  const fpBtn = $("fingerprintBtn");
+  if (state && state.fingerprintCredId) {
+    fpBtn.hidden = false;
+    fpBtn.onclick = tryFingerprintUnlock;
+    // auto-prompt once when the lock screen appears
+    setTimeout(tryFingerprintUnlock, 250);
+  } else {
+    fpBtn.hidden = true;
+  }
+}
+async function tryFingerprintUnlock() {
+  const ok = await authenticateFingerprint();
+  if (ok) enterApp();
 }
 
 function renderPinDots() {
@@ -292,6 +366,7 @@ function enterApp() {
   $("lockScreen").classList.add("hidden");
   $("mainApp").classList.remove("hidden");
   $("mainApp").style.display = "flex";
+  processRecurring();
   switchTab("home");
   renderAll();
 }
@@ -543,6 +618,8 @@ function renderProfile() {
   $("profileNameDisplay").textContent = state.profile.name || "—";
   $("profileAvatarInitial").textContent = (state.profile.name || "?").trim().charAt(0).toUpperCase();
   $("autoLockVal").textContent = state.autoLock === "5min" ? "After 5 min" : state.autoLock === "1min" ? "After 1 min" : "Immediately";
+  $("fingerprintVal").textContent = state.fingerprintCredId ? "On" : "Off";
+  $("gdriveVal").textContent = state.gdriveEnabled ? "On" : "Off";
 }
 
 /* ================= SHEETS / MODALS ================= */
@@ -564,7 +641,7 @@ function openSheet(title, bodyHtml, onMount) {
 function closeSheet() { $("sheetRoot").innerHTML = ""; }
 
 /* ---- Add / Edit transaction ---- */
-function openTxSheet(type, existingTx) {
+function openTxSheet(type, existingTx, prefill) {
   pendingTxType = type;
   const cats = state.categories[type];
   const walletsHtml = state.wallets.map((w) => `<option value="${w.id}">${escapeHtml(w.name)}</option>`).join("");
@@ -573,17 +650,26 @@ function openTxSheet(type, existingTx) {
       <button data-t="expense" class="${type === "expense" ? "active" : ""}">Expense</button>
       <button data-t="income" class="${type === "income" ? "active" : ""}">Income</button>
     </div>
-    <div class="field"><label>Amount (RWF)</label><input type="number" inputmode="numeric" id="txAmount" placeholder="0" value="${existingTx ? existingTx.amount : ""}"></div>
+    <div class="field"><label>Amount (RWF)</label><input type="number" inputmode="numeric" id="txAmount" placeholder="0" value="${existingTx ? existingTx.amount : (prefill && prefill.amount) || ""}"></div>
     <div class="field"><label>Wallet</label><select id="txWallet">${walletsHtml}</select></div>
     <div class="field"><label>Category</label><div class="cat-grid" id="txCatGrid"></div></div>
-    <div class="field"><label>Note (optional)</label><input type="text" id="txNote" placeholder="e.g. Lunch with friends" value="${existingTx ? escapeHtml(existingTx.note || "") : ""}"></div>
+    <div class="field"><label>Note (optional)</label><input type="text" id="txNote" placeholder="e.g. Lunch with friends" value="${existingTx ? escapeHtml(existingTx.note || "") : escapeHtml((prefill && prefill.note) || "")}"></div>
     <div class="field"><label>Date</label><input type="datetime-local" id="txDate" value="${existingTx ? existingTx.date.slice(0,16) : todayISO()}"></div>
+    ${!existingTx ? `
+    <div class="field"><label>Repeat</label>
+      <div class="toggle-row" id="txRepeatToggle">
+        <button data-r="" class="active">None</button>
+        <button data-r="weekly">Weekly</button>
+        <button data-r="monthly">Monthly</button>
+      </div>
+    </div>` : ""}
     <button class="btn-primary" id="txSaveBtn" style="margin-top:8px;">${existingTx ? "Save changes" : "Add transaction"}</button>
     ${existingTx ? `<button class="btn-secondary" id="txDeleteBtn" style="margin-top:10px;color:#E11D48;border-color:#F3D6DC;">Delete</button>` : ""}
   `;
   openSheet(existingTx ? "Edit transaction" : "Add transaction", body, () => {
-    let selectedCat = existingTx ? existingTx.category : cats[0].name;
+    let selectedCat = existingTx ? existingTx.category : (prefill && prefill.category) || cats[0].name;
     let selectedType = type;
+    let selectedRepeat = "";
 
     function renderCatGrid() {
       const grid = $("txCatGrid");
@@ -609,6 +695,15 @@ function openTxSheet(type, existingTx) {
 
     if (existingTx) $("txWallet").value = existingTx.walletId;
 
+    if (!existingTx) {
+      document.querySelectorAll("#txRepeatToggle button").forEach((b) => {
+        b.addEventListener("click", () => {
+          selectedRepeat = b.dataset.r;
+          document.querySelectorAll("#txRepeatToggle button").forEach((x) => x.classList.toggle("active", x === b));
+        });
+      });
+    }
+
     $("txSaveBtn").addEventListener("click", () => {
       const amount = parseFloat($("txAmount").value);
       const walletId = $("txWallet").value;
@@ -627,11 +722,15 @@ function openTxSheet(type, existingTx) {
         const tx = { id: uid(), type: selectedType, amount, walletId, category: selectedCat, note, date };
         state.transactions.push(tx);
         applyWalletDelta(walletId, selectedType === "income" ? amount : -amount);
+        if (selectedRepeat) {
+          const next = selectedRepeat === "weekly" ? addWeeks(new Date(date), 1) : addMonths(new Date(date), 1);
+          state.recurringRules.push({ id: uid(), type: selectedType, amount, walletId, category: selectedCat, note, frequency: selectedRepeat, nextDate: next.toISOString() });
+        }
       }
       saveState();
       closeSheet();
       renderAll();
-      toast(existingTx ? "Transaction updated" : "Transaction added");
+      toast(existingTx ? "Transaction updated" : selectedRepeat ? "Transaction added — it'll repeat automatically" : "Transaction added");
     });
 
     if (existingTx) {
@@ -822,7 +921,223 @@ function openChangePin() {
   });
 }
 
-/* ---- Auto-lock picker ---- */
+/* ---- Fingerprint settings ---- */
+async function openFingerprintSettings() {
+  const available = await platformAuthAvailable();
+  if (!available) {
+    openSheet("Fingerprint unlock", `<p style="color:var(--text-muted);font-size:14px;">This device or browser doesn't support fingerprint/face unlock. You can still use your PIN — it's just as secure.</p>`);
+    return;
+  }
+  if (state.fingerprintCredId) {
+    const body = `
+      <p style="color:var(--text-muted);font-size:14px;margin-bottom:16px;">Fingerprint unlock is <b style="color:var(--success)">ON</b>. You'll be asked for your fingerprint each time you open the app, with your PIN as a backup.</p>
+      <button class="btn-secondary" id="fpOffBtn" style="color:#E11D48;border-color:#F3D6DC;">Turn off fingerprint unlock</button>
+    `;
+    openSheet("Fingerprint unlock", body, () => {
+      $("fpOffBtn").addEventListener("click", () => {
+        state.fingerprintCredId = null;
+        saveState();
+        closeSheet();
+        renderProfile();
+        toast("Fingerprint unlock turned off");
+      });
+    });
+  } else {
+    const body = `
+      <p style="color:var(--text-muted);font-size:14px;margin-bottom:16px;">Unlock MyWallet with your fingerprint or face instead of typing your PIN every time. Your PIN still works as a backup.</p>
+      <button class="btn-primary" id="fpOnBtn">Enable fingerprint unlock</button>
+    `;
+    openSheet("Fingerprint unlock", body, () => {
+      $("fpOnBtn").addEventListener("click", async () => {
+        toast("Follow the prompt on your screen...");
+        const ok = await registerFingerprint();
+        if (ok) { closeSheet(); renderProfile(); toast("Fingerprint unlock enabled"); }
+        else toast("Couldn't set that up — try again");
+      });
+    });
+  }
+}
+
+/* ---- Recurring transactions ---- */
+function frequencyLabel(f) { return f === "weekly" ? "Every week" : "Every month"; }
+function openRecurringList() {
+  const body = `<div class="settings-group" id="recurringList"></div>
+    <p style="color:var(--text-muted);font-size:13px;margin-top:10px;">To add a new one, turn on "Repeat" when creating a transaction.</p>`;
+  openSheet("Recurring transactions", body, renderRecurringList);
+}
+function renderRecurringList() {
+  const list = $("recurringList");
+  if (!list) return;
+  list.innerHTML = "";
+  if (state.recurringRules.length === 0) {
+    list.innerHTML = `<div class="empty-state" style="padding:20px 0;"><div class="em-mark">🔁</div><p>No recurring transactions yet.</p></div>`;
+    return;
+  }
+  state.recurringRules.forEach((r) => {
+    const wallet = state.wallets.find((w) => w.id === r.walletId);
+    const cat = findCategory(r.type, r.category);
+    const row = document.createElement("div");
+    row.className = "wallet-manage-row";
+    row.innerHTML = `
+      <span style="font-size:16px;">${cat ? cat.emoji : "🔁"}</span>
+      <div style="flex:1;">
+        <div style="font-weight:700;font-size:14px;">${escapeHtml(r.category)} · ${r.type === "income" ? "+" : "−"}${formatMoney(r.amount)}</div>
+        <div style="font-size:12px;color:var(--text-muted);">${frequencyLabel(r.frequency)} · ${wallet ? escapeHtml(wallet.name) : "—"} · next ${new Date(r.nextDate).toLocaleDateString("en-GB",{day:"numeric",month:"short"})}</div>
+      </div>
+      <button class="icon-btn" style="width:32px;height:32px;font-size:13px;" data-del="${r.id}">🗑️</button>
+    `;
+    row.querySelector("[data-del]").addEventListener("click", () => {
+      if (!confirm(`Stop "${r.category}" from repeating? Past transactions it already created will stay.`)) return;
+      state.recurringRules = state.recurringRules.filter((x) => x.id !== r.id);
+      saveState();
+      renderRecurringList();
+    });
+    list.appendChild(row);
+  });
+}
+function addMonths(date, n) { const d = new Date(date); d.setMonth(d.getMonth() + n); return d; }
+function addWeeks(date, n) { const d = new Date(date); d.setDate(d.getDate() + n * 7); return d; }
+function processRecurring() {
+  if (!state.recurringRules.length) return;
+  const today = new Date();
+  let changed = false;
+  state.recurringRules.forEach((r) => {
+    let next = new Date(r.nextDate);
+    let guard = 0;
+    while (next <= today && guard < 24) {
+      const tx = { id: uid(), type: r.type, amount: r.amount, walletId: r.walletId, category: r.category, note: r.note, date: next.toISOString() };
+      state.transactions.push(tx);
+      applyWalletDelta(r.walletId, r.type === "income" ? r.amount : -r.amount);
+      next = r.frequency === "weekly" ? addWeeks(next, 1) : addMonths(next, 1);
+      changed = true;
+      guard++;
+    }
+    r.nextDate = next.toISOString();
+  });
+  if (changed) saveState();
+}
+
+/* ---- Lending & debts ---- */
+function openLendingList() {
+  const body = `<div class="settings-group" id="lendingList"></div>
+    <button class="btn-secondary" id="addDebtBtn" style="margin-top:12px;">+ Add entry</button>`;
+  openSheet("Lending & debts", body, () => {
+    renderLendingList();
+    $("addDebtBtn").addEventListener("click", openDebtForm);
+  });
+}
+function debtNetSummary() {
+  return state.debts.filter((d) => !d.settled).reduce((s, d) => s + (d.direction === "owed_to_me" ? d.amount : -d.amount), 0);
+}
+function renderLendingList() {
+  const list = $("lendingList");
+  if (!list) return;
+  list.innerHTML = "";
+  if (state.debts.length === 0) {
+    list.innerHTML = `<div class="empty-state" style="padding:20px 0;"><div class="em-mark">🤝</div><p>Nobody owes you, and you owe nobody. Tap + to log one.</p></div>`;
+    return;
+  }
+  const sorted = [...state.debts].sort((a, b) => (a.settled === b.settled ? 0 : a.settled ? 1 : -1) || new Date(b.date) - new Date(a.date));
+  sorted.forEach((d) => {
+    const row = document.createElement("div");
+    row.className = "debt-row" + (d.settled ? " settled" : "");
+    row.innerHTML = `
+      <div class="debt-avatar">${escapeHtml((d.personName || "?").charAt(0).toUpperCase())}</div>
+      <div style="flex:1;min-width:0;">
+        <div style="font-weight:700;font-size:14px;">${escapeHtml(d.personName)}</div>
+        <div style="font-size:12px;color:var(--text-muted);">${d.settled ? "Settled · " : ""}${d.note ? escapeHtml(d.note) + " · " : ""}${formatDateShort(d.date)}</div>
+      </div>
+      <div style="text-align:right;">
+        <div class="debt-amt ${d.direction}">RWF ${formatMoney(d.amount)}</div>
+        <div class="debt-tag ${d.direction}">${d.direction === "owed_to_me" ? "Owes you" : "You owe"}</div>
+      </div>
+    `;
+    row.addEventListener("click", () => openDebtDetail(d.id));
+    list.appendChild(row);
+  });
+}
+function openDebtForm() {
+  const walletsHtml = state.wallets.map((w) => `<option value="${w.id}">${escapeHtml(w.name)}</option>`).join("");
+  const body = `
+    <div class="toggle-row" id="debtDirToggle">
+      <button data-d="owed_to_me" class="active">They owe me</button>
+      <button data-d="i_owe">I owe them</button>
+    </div>
+    <div class="field"><label>Person's name</label><input type="text" id="debtName" placeholder="e.g. Claudine"></div>
+    <div class="field"><label>Amount (RWF)</label><input type="number" id="debtAmount" placeholder="0"></div>
+    <div class="field"><label>Note (optional)</label><input type="text" id="debtNote" placeholder="e.g. Lent for transport"></div>
+    <button class="btn-primary" id="debtSaveBtn" style="margin-top:8px;">Save</button>
+  `;
+  openSheet("New lending entry", body, () => {
+    let dir = "owed_to_me";
+    document.querySelectorAll("#debtDirToggle button").forEach((b) => {
+      b.addEventListener("click", () => { dir = b.dataset.d; document.querySelectorAll("#debtDirToggle button").forEach((x) => x.classList.toggle("active", x === b)); });
+    });
+    $("debtSaveBtn").addEventListener("click", () => {
+      const name = $("debtName").value.trim();
+      const amount = parseFloat($("debtAmount").value);
+      const note = $("debtNote").value.trim();
+      if (!name) { toast("Enter a name"); return; }
+      if (!amount || amount <= 0) { toast("Enter a valid amount"); return; }
+      state.debts.push({ id: uid(), personName: name, amount, direction: dir, note, date: new Date().toISOString(), settled: false });
+      saveState();
+      closeSheet();
+      openLendingList();
+      toast("Saved");
+    });
+  });
+}
+function openDebtDetail(id) {
+  const d = state.debts.find((x) => x.id === id);
+  if (!d) return;
+  const body = `
+    <div style="text-align:center;margin-bottom:18px;">
+      <div class="debt-avatar" style="width:56px;height:56px;font-size:20px;margin:0 auto 10px;">${escapeHtml((d.personName || "?").charAt(0).toUpperCase())}</div>
+      <div style="font-weight:800;font-size:17px;">${escapeHtml(d.personName)}</div>
+      <div class="debt-amt ${d.direction}" style="font-size:20px;margin-top:4px;">RWF ${formatMoney(d.amount)}</div>
+      <div class="debt-tag ${d.direction}" style="margin-top:6px;display:inline-block;">${d.direction === "owed_to_me" ? "Owes you" : "You owe"}</div>
+    </div>
+    ${!d.settled ? `<button class="btn-primary" id="debtSettleBtn">Mark as settled</button>` : `<p style="text-align:center;color:var(--text-muted);font-size:13px;">Settled on ${formatDateShort(d.settledDate || d.date)}</p>`}
+    <button class="btn-secondary" id="debtDeleteBtn" style="margin-top:10px;color:#E11D48;border-color:#F3D6DC;">Delete entry</button>
+  `;
+  openSheet("Lending detail", body, () => {
+    if (!d.settled) {
+      $("debtSettleBtn").addEventListener("click", () => {
+        d.settled = true;
+        d.settledDate = new Date().toISOString();
+        saveState();
+        closeSheet();
+        renderAll();
+        if (confirm(`Record this as ${d.direction === "owed_to_me" ? "money received" : "money paid"} in one of your wallets?`)) {
+          if (!state.categories.income.some((c) => c.name === "Debt settlement")) state.categories.income.push({ name: "Debt settlement", emoji: "🤝" });
+          if (!state.categories.expense.some((c) => c.name === "Debt settlement")) state.categories.expense.push({ name: "Debt settlement", emoji: "🤝" });
+          openTxSheet(d.direction === "owed_to_me" ? "income" : "expense", null, { amount: d.amount, category: "Debt settlement", note: d.personName });
+        } else {
+          toast("Marked as settled");
+        }
+      });
+    }
+    $("debtDeleteBtn").addEventListener("click", () => {
+      if (!confirm("Delete this entry?")) return;
+      state.debts = state.debts.filter((x) => x.id !== d.id);
+      saveState();
+      closeSheet();
+      renderAll();
+    });
+  });
+}
+
+/* ---- Google Drive backup (info stage) ---- */
+function openGoogleDriveInfo() {
+  const body = `
+    <p style="color:var(--text-muted);font-size:14px;margin-bottom:14px;">This backs up your data to a private folder in your own Google Drive automatically — nothing goes through anyone else's server.</p>
+    <p style="color:var(--text-muted);font-size:14px;margin-bottom:14px;">It needs a quick one-time setup with your Google account (about 5 minutes) before it can turn on. Head back to our chat and I'll walk you through it.</p>
+    <button class="btn-secondary" id="gdriveCloseBtn">Got it</button>
+  `;
+  openSheet("Google Drive backup", body, () => {
+    $("gdriveCloseBtn").addEventListener("click", closeSheet);
+  });
+}
 function openAutoLockPicker() {
   const opts = [["immediate", "Immediately"], ["1min", "After 1 minute"], ["5min", "After 5 minutes"]];
   const body = `<div class="settings-group">${opts.map(([k, l]) => `
