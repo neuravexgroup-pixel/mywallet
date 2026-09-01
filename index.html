@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<meta name="theme-color" content="#7C3AED">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="MyWallet">
+<meta name="description" content="Personal finance tracker for BK Bank, MoMo and Cash — offline and PIN-protected.">
+<title>MyWallet</title>
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- ===== SETUP (first run) ===== -->
+  <div id="setupScreen" class="setup-form hidden">
+    <div class="eyebrow-mark"></div>
+    <h2 id="setupTitle">Let's set you up</h2>
+    <p class="sub" id="setupSub">Your name, and a PIN to keep your money private.</p>
+    <div class="field" id="nameField">
+      <label>Your name</label>
+      <input type="text" id="setupName" placeholder="e.g. Eric" autocomplete="off">
+    </div>
+    <div class="field" id="pinField">
+      <label id="pinFieldLabel">Create a 4-digit PIN</label>
+      <input type="password" id="setupPin" inputmode="numeric" maxlength="4" placeholder="••••" autocomplete="off">
+    </div>
+    <div class="field hidden" id="pinConfirmField">
+      <label>Confirm PIN</label>
+      <input type="password" id="setupPinConfirm" inputmode="numeric" maxlength="4" placeholder="••••" autocomplete="off">
+    </div>
+    <p id="setupError" style="color:#E11D48;font-size:13px;margin:-8px 0 0;"></p>
+    <button class="btn-primary" id="setupContinueBtn">Continue</button>
+  </div>
+
+  <!-- ===== LOCK SCREEN ===== -->
+  <div id="lockScreen" class="lock-screen hidden">
+    <div class="lock-mark">🔒</div>
+    <h2 id="lockGreeting">Welcome back</h2>
+    <p>Enter your PIN to unlock</p>
+    <div class="pin-dots" id="pinDots"></div>
+    <div class="lock-error" id="lockError"></div>
+    <div class="keypad" id="keypad"></div>
+  </div>
+
+  <!-- ===== MAIN APP ===== -->
+  <div id="mainApp" class="hidden" style="display:flex; flex-direction:column; flex:1;">
+
+    <!-- HOME -->
+    <div id="screen-home" class="screen">
+      <div class="screen-header">
+        <div>
+          <div style="font-size:13px;color:var(--text-muted);font-weight:600;" id="homeGreetingLabel">Welcome back</div>
+          <h1 id="homeGreetingName">Hi</h1>
+        </div>
+        <button class="icon-btn" id="btnGoProfileFromHome">👤</button>
+      </div>
+
+      <div class="balance-card">
+        <div class="label">Total balance</div>
+        <div class="amount"><span class="cur">RWF</span><span id="homeTotalBalance">0</span></div>
+        <div class="balance-quick">
+          <button id="btnQuickIncome">＋ Income</button>
+          <button id="btnQuickExpense">－ Expense</button>
+        </div>
+      </div>
+
+      <div class="section-title">
+        <h3>Your wallets</h3>
+        <a id="btnGoWalletsManage">Manage</a>
+      </div>
+      <div class="wallet-row" id="homeWalletRow"></div>
+
+      <div class="section-title">
+        <h3>Recent activity</h3>
+        <a id="btnSeeAllActivity">See all</a>
+      </div>
+      <div class="tx-list" id="homeRecentTx"></div>
+    </div>
+
+    <!-- ACTIVITY -->
+    <div id="screen-activity" class="screen hidden">
+      <div class="screen-header"><h1>Activity</h1></div>
+      <div class="search-bar">
+        <span>🔍</span>
+        <input type="text" id="activitySearch" placeholder="Search transactions">
+      </div>
+      <div class="filter-row" id="activityFilters"></div>
+      <div id="activityList"></div>
+    </div>
+
+    <!-- STATS -->
+    <div id="screen-stats" class="screen hidden">
+      <div class="screen-header"><h1>Stats</h1></div>
+      <div class="month-switch">
+        <button id="btnPrevMonth">‹</button>
+        <div class="m-label" id="statsMonthLabel">Month</div>
+        <button id="btnNextMonth">›</button>
+      </div>
+      <div class="stat-summary">
+        <div class="stat-box income"><div class="s-label">Income</div><div class="s-val" id="statIncome">0</div></div>
+        <div class="stat-box expense"><div class="s-label">Expenses</div><div class="s-val" id="statExpense">0</div></div>
+      </div>
+      <div class="donut-wrap" id="donutWrap"></div>
+      <div class="section-title"><h3>By category</h3></div>
+      <div class="bar-list" id="statsBarList"></div>
+    </div>
+
+    <!-- GOALS -->
+    <div id="screen-goals" class="screen hidden">
+      <div class="screen-header"><h1>Goals</h1></div>
+      <div id="goalsList"></div>
+    </div>
+
+    <!-- PROFILE -->
+    <div id="screen-profile" class="screen hidden">
+      <div class="screen-header"><h1>Profile</h1></div>
+      <div class="profile-header">
+        <div class="profile-avatar" id="profileAvatarInitial">E</div>
+        <div>
+          <div class="profile-name" id="profileNameDisplay">Name</div>
+          <div class="profile-sub">MyWallet · RWF</div>
+        </div>
+      </div>
+
+      <div class="settings-group">
+        <div class="settings-row" id="rowEditName">
+          <div class="sr-icon">✎</div><div class="sr-label">Edit name</div><div class="sr-chev">›</div>
+        </div>
+        <div class="settings-row" id="rowManageWallets">
+          <div class="sr-icon">👛</div><div class="sr-label">Manage wallets</div><div class="sr-chev">›</div>
+        </div>
+        <div class="settings-row" id="rowManageCategories">
+          <div class="sr-icon">🏷️</div><div class="sr-label">Manage categories</div><div class="sr-chev">›</div>
+        </div>
+      </div>
+
+      <div class="settings-group">
+        <div class="settings-row" id="rowChangePin">
+          <div class="sr-icon">🔒</div><div class="sr-label">Change PIN</div><div class="sr-chev">›</div>
+        </div>
+        <div class="settings-row" id="rowAutoLock">
+          <div class="sr-icon">⏱️</div><div class="sr-label">Auto-lock</div><div class="sr-val" id="autoLockVal">Immediately</div><div class="sr-chev">›</div>
+        </div>
+      </div>
+
+      <div class="settings-group">
+        <div class="settings-row" id="rowExport">
+          <div class="sr-icon">⬇️</div><div class="sr-label">Export backup</div><div class="sr-chev">›</div>
+        </div>
+        <div class="settings-row" id="rowImport">
+          <div class="sr-icon">⬆️</div><div class="sr-label">Restore backup</div><div class="sr-chev">›</div>
+        </div>
+      </div>
+
+      <div class="settings-group">
+        <div class="settings-row danger" id="rowLockNow">
+          <div class="sr-icon">🔒</div><div class="sr-label">Lock now</div>
+        </div>
+        <div class="settings-row danger" id="rowResetData">
+          <div class="sr-icon">🗑️</div><div class="sr-label">Erase all data</div>
+        </div>
+      </div>
+      <p style="text-align:center;color:var(--text-muted);font-size:12px;margin-top:10px;">All data stays on this device only.</p>
+    </div>
+
+    <!-- FAB (context-sensitive: add transaction on Home/Activity, add goal on Goals) -->
+    <button class="fab hidden" id="fabAdd">＋</button>
+
+    <!-- TAB BAR -->
+    <div class="tabbar">
+      <button class="tab-btn active" data-tab="home"><span class="t-icon">🏠</span><span class="t-label">Home</span></button>
+      <button class="tab-btn" data-tab="activity"><span class="t-icon">📃</span><span class="t-label">Activity</span></button>
+      <button class="tab-btn" data-tab="stats"><span class="t-icon">📊</span><span class="t-label">Stats</span></button>
+      <button class="tab-btn" data-tab="goals"><span class="t-icon">🎯</span><span class="t-label">Goals</span></button>
+      <button class="tab-btn" data-tab="profile"><span class="t-icon">👤</span><span class="t-label">Profile</span></button>
+    </div>
+  </div>
+
+  <!-- ===== SHEET / MODAL ROOT ===== -->
+  <div id="sheetRoot"></div>
+  <div id="toastRoot"></div>
+
+</div>
+<script src="app.js"></script>
+</body>
+</html>
