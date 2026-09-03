@@ -6,6 +6,8 @@
 
 const STORAGE_KEY = "mywallet_state_v1";
 const $ = (id) => document.getElementById(id);
+const GOOGLE_CLIENT_ID = "914831071773-cj6ed81s89drtsb8l4nneiophp9sidsl.apps.googleusercontent.com";
+const GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file";
 
 const WALLET_TYPES = {
   bank: { label: "Bank", icon: "🏦", color: "#7C3AED" },
@@ -39,6 +41,9 @@ function defaultState() {
     pinSalt: null,
     autoLock: "immediate", // immediate | 1min | 5min
     fingerprintCredId: null,
+    gdriveEnabled: false,
+    gdriveFileId: null,
+    gdriveLastBackup: null,
     wallets: [
       { id: uid(), name: "BK Bank", type: "bank", balance: 0 },
       { id: uid(), name: "MoMo", type: "momo", balance: 0 },
@@ -63,11 +68,15 @@ function loadState() {
     if (parsed.recurringRules === undefined) parsed.recurringRules = [];
     if (parsed.debts === undefined) parsed.debts = [];
     if (parsed.fingerprintCredId === undefined) parsed.fingerprintCredId = null;
+    if (parsed.gdriveEnabled === undefined) parsed.gdriveEnabled = false;
+    if (parsed.gdriveFileId === undefined) parsed.gdriveFileId = null;
+    if (parsed.gdriveLastBackup === undefined) parsed.gdriveLastBackup = null;
     return parsed;
   } catch (e) { return null; }
 }
 function saveState() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  scheduleGDriveBackup();
 }
 
 function uid() { return Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4); }
@@ -184,7 +193,18 @@ window.addEventListener("DOMContentLoaded", () => {
 
 function registerSW() {
   if ("serviceWorker" in navigator) {
-    navigator.serviceWorker.register("service-worker.js").catch(() => {});
+    navigator.serviceWorker.register("service-worker.js").then((reg) => {
+      reg.update().catch(() => {});
+    }).catch(() => {});
+
+    let refreshedOnce = false;
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      if (refreshedOnce) return;
+      // don't yank the page out from under someone mid-entry in a sheet
+      if ($("sheetRoot") && $("sheetRoot").innerHTML.trim() !== "") return;
+      refreshedOnce = true;
+      window.location.reload();
+    });
   }
 }
 
@@ -369,6 +389,7 @@ function enterApp() {
   processRecurring();
   switchTab("home");
   renderAll();
+  if (state.gdriveEnabled) ensureGDriveToken(true).catch(() => {});
 }
 
 /* ---------------- TAB SWITCHING ---------------- */
@@ -1127,16 +1148,135 @@ function openDebtDetail(id) {
   });
 }
 
-/* ---- Google Drive backup (info stage) ---- */
-function openGoogleDriveInfo() {
-  const body = `
-    <p style="color:var(--text-muted);font-size:14px;margin-bottom:14px;">This backs up your data to a private folder in your own Google Drive automatically — nothing goes through anyone else's server.</p>
-    <p style="color:var(--text-muted);font-size:14px;margin-bottom:14px;">It needs a quick one-time setup with your Google account (about 5 minutes) before it can turn on. Head back to our chat and I'll walk you through it.</p>
-    <button class="btn-secondary" id="gdriveCloseBtn">Got it</button>
-  `;
-  openSheet("Google Drive backup", body, () => {
-    $("gdriveCloseBtn").addEventListener("click", closeSheet);
+/* ---- Google Drive backup (real implementation) ---- */
+let gisTokenClient = null;
+let gdriveAccessToken = null;
+let gdriveBackupTimer = null;
+
+function ensureGisClient() {
+  if (!window.google || !window.google.accounts || !window.google.accounts.oauth2) return null;
+  if (!gisTokenClient) {
+    gisTokenClient = google.accounts.oauth2.initTokenClient({
+      client_id: GOOGLE_CLIENT_ID,
+      scope: GOOGLE_DRIVE_SCOPE,
+      callback: () => {}
+    });
+  }
+  return gisTokenClient;
+}
+
+function requestGDriveToken(silent) {
+  return new Promise((resolve) => {
+    const client = ensureGisClient();
+    if (!client) { resolve(null); return; }
+    client.callback = (resp) => {
+      if (resp && resp.access_token) { gdriveAccessToken = resp.access_token; resolve(resp.access_token); }
+      else resolve(null);
+    };
+    try { client.requestAccessToken(silent ? { prompt: "" } : {}); }
+    catch (e) { resolve(null); }
   });
+}
+
+async function ensureGDriveToken(silent) {
+  if (gdriveAccessToken) return gdriveAccessToken;
+  return requestGDriveToken(silent);
+}
+
+async function backupToGoogleDrive(silent) {
+  if (!state.gdriveEnabled) return false;
+  const token = await ensureGDriveToken(silent !== false);
+  if (!token) return false;
+  const content = JSON.stringify(state);
+  try {
+    if (!state.gdriveFileId) {
+      const boundary = "mywalletbound";
+      const metadata = { name: "mywallet-backup.json", mimeType: "application/json" };
+      const body = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n--${boundary}\r\nContent-Type: application/json\r\n\r\n${content}\r\n--${boundary}--`;
+      const res = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": `multipart/related; boundary=${boundary}` },
+        body
+      });
+      if (!res.ok) return false;
+      const data = await res.json();
+      state.gdriveFileId = data.id;
+    } else {
+      const res = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${state.gdriveFileId}?uploadType=media`, {
+        method: "PATCH",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: content
+      });
+      if (!res.ok) {
+        if (res.status === 404) { state.gdriveFileId = null; return backupToGoogleDrive(silent); }
+        return false;
+      }
+    }
+    state.gdriveLastBackup = new Date().toISOString();
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    return true;
+  } catch (e) { return false; }
+}
+
+function scheduleGDriveBackup() {
+  if (!state || !state.gdriveEnabled) return;
+  clearTimeout(gdriveBackupTimer);
+  gdriveBackupTimer = setTimeout(() => { backupToGoogleDrive(true); }, 4000);
+}
+
+function connectGoogleDrive(onDone) {
+  const client = ensureGisClient();
+  if (!client) { toast("Google sign-in isn't available right now — check your connection"); if (onDone) onDone(false); return; }
+  client.callback = async (resp) => {
+    if (resp.error || !resp.access_token) { toast("Couldn't connect to Google Drive"); if (onDone) onDone(false); return; }
+    gdriveAccessToken = resp.access_token;
+    state.gdriveEnabled = true;
+    saveState();
+    const ok = await backupToGoogleDrive(false);
+    toast(ok ? "Google Drive connected" : "Connected, but the first backup failed — try again");
+    if (onDone) onDone(true);
+  };
+  try { client.requestAccessToken(); } catch (e) { if (onDone) onDone(false); }
+}
+
+/* ---- Google Drive settings sheet ---- */
+function openGoogleDriveInfo() {
+  if (state.gdriveEnabled) {
+    const last = state.gdriveLastBackup ? new Date(state.gdriveLastBackup).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "Not yet";
+    const body = `
+      <p style="color:var(--text-muted);font-size:14px;margin-bottom:6px;">Backing up automatically to a private file in your Google Drive.</p>
+      <p style="color:var(--text-muted);font-size:13px;margin-bottom:18px;">Last backup: <b style="color:var(--text)">${last}</b></p>
+      <button class="btn-primary" id="gdriveBackupNowBtn">Backup now</button>
+      <button class="btn-secondary" id="gdriveOffBtn" style="margin-top:10px;color:#E11D48;border-color:#F3D6DC;">Disconnect Google Drive</button>
+    `;
+    openSheet("Google Drive backup", body, () => {
+      $("gdriveBackupNowBtn").addEventListener("click", async () => {
+        toast("Backing up...");
+        const ok = await backupToGoogleDrive(false);
+        toast(ok ? "Backed up to Google Drive" : "Backup failed — try again");
+        renderProfile();
+      });
+      $("gdriveOffBtn").addEventListener("click", () => {
+        state.gdriveEnabled = false;
+        gdriveAccessToken = null;
+        saveState();
+        closeSheet();
+        renderProfile();
+        toast("Google Drive disconnected");
+      });
+    });
+  } else {
+    const body = `
+      <p style="color:var(--text-muted);font-size:14px;margin-bottom:16px;">Automatically back up your data to a private file in your own Google Drive — nothing passes through anyone else's server.</p>
+      <button class="btn-primary" id="gdriveConnectBtn">Connect Google Drive</button>
+    `;
+    openSheet("Google Drive backup", body, () => {
+      $("gdriveConnectBtn").addEventListener("click", () => {
+        toast("Follow the Google sign-in prompt...");
+        connectGoogleDrive((success) => { if (success) { closeSheet(); renderProfile(); } });
+      });
+    });
+  }
 }
 function openAutoLockPicker() {
   const opts = [["immediate", "Immediately"], ["1min", "After 1 minute"], ["5min", "After 5 minutes"]];

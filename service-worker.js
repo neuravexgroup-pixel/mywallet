@@ -1,4 +1,4 @@
-const CACHE_NAME = "mywallet-cache-v2";
+const CACHE_NAME = "mywallet-cache-v4";
 const ASSETS = [
   "./",
   "./index.html",
